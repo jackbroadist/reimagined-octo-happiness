@@ -8,7 +8,7 @@ on:
 jobs:
   high-speed-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # زيادة الوقت
+    timeout-minutes: 15
     
     steps:
       - name: Checkout code
@@ -17,116 +17,104 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.3'  # أحدث إصدار
+          php-version: '8.3'
           extensions: curl, simplexml, pcntl, posix
-          tools: parallel
 
-      - name: Install system dependencies
+      - name: Install parallel utility
         run: |
           sudo apt-get update
-          sudo apt-get install -y parallel curl wget
+          sudo apt-get install -y parallel
 
-      - name: Optimize system limits
+      - name: Attempt to increase limits (اختياري - قد لا يعمل)
         run: |
-          # زيادة حدود النظام
-          ulimit -n 65535
-          ulimit -u 65535
-          echo "fs.file-max = 1000000" | sudo tee -a /etc/sysctl.conf
-          echo "net.core.somaxconn = 65535" | sudo tee -a /etc/sysctl.conf
-          echo "net.ipv4.tcp_max_syn_backlog = 65535" | sudo tee -a /etc/sysctl.conf
-          sudo sysctl -p
+          # محاولة لرفع الحدود - قد تنجح أو تفشل
+          echo "Current limits before:"
+          ulimit -a
+          
+          # محاولة باستخدام prlimit بدلاً من ulimit
+          prlimit --pid $$ --nproc=unlimited --nofile=8192 2>/dev/null || true
+          
+          echo "Limits after attempt:"
+          ulimit -a
+          
+          # طلب زيادة soft limits (قد ينجح أحياناً)
+          echo "runner soft nproc 65535" | sudo tee -a /etc/security/limits.conf 2>/dev/null || true
+          echo "runner hard nproc 65535" | sudo tee -a /etc/security/limits.conf 2>/dev/null || true
 
       - name: Run multiple instances in single job
         run: |
-          # إنشاء ملف تشغيل متوازي
-          cat > run_instances.sh << 'EOF'
-          #!/bin/bash
+          # استراتيجية ذكية للتشغيل المتوازي
+          echo "=== Starting Smart Parallel Execution ==="
           
-          # عدد العمليات المطلوبة
+          # عدد العمليات الإجمالي المطلوب
           TOTAL_INSTANCES=100
-          CONCURRENT_INSTANCES=10  # 10 في كل مرة
           
-          # دالة لتشغيل instance
-          run_instance() {
-            local instance_id=$1
-            echo "=== Starting Instance $instance_id ==="
-            
-            # تهيئة متغير البيئة
-            export INSTANCE_ID=$instance_id
-            
-            # خيارات PHP لتحسين الأداء
-            php -d memory_limit=-1 \
-                -d max_execution_time=0 \
-                -d opcache.enable=1 \
-                -d opcache.memory_consumption=256 \
-                -d realpath_cache_size=16M \
-                -d disable_functions= \
-                main.php > "output_$instance_id.log" 2>&1 &
-            
-            local pid=$!
-            echo $pid > "pid_$instance_id"
-            
-            # انتظار قصير بين العمليات
-            sleep 0.2
-          }
+          # بدلاً من تشغيل 100 عملية دفعة واحدة، نقسمها إلى دفعات
+          # مع التحكم في التوازي لتجنب تجاوز الحدود
           
-          # تشغيل مجموعات من 10
-          for group in $(seq 0 10 90); do
-            echo "=== Starting Group $(($group/10 + 1)) ==="
+          # الطريقة 1: استخدام GNU Parallel مع التحكم بالتوازي
+          echo "Method 1: Using GNU Parallel with controlled concurrency"
+          
+          # إنشاء قائمة بجميع instance IDs
+          seq 1 $TOTAL_INSTANCES > instances.txt
+          
+          # تشغيل مع تحكم دقيق في التوازي (10 عمليات متزامنة فقط)
+          parallel -j 10 --delay 0.2 --progress \
+            'INSTANCE_ID={} php -d memory_limit=512M -d max_execution_time=300 main.php 2>&1 | tail -5' \
+            :::: instances.txt
+          
+          # أو الطريقة 2: استخدام clusters من العمليات
+          echo -e "\n=== Alternative Method: Process Clusters ==="
+          
+          # تقسيم إلى 5 مجموعات من 20 عملية
+          for CLUSTER in {1..5}; do
+            echo "Starting Cluster $CLUSTER (Instances $((($CLUSTER-1)*20+1))-$((CLUSTER*20)))"
             
-            # تشغيل 10 عمليات
-            for i in $(seq 1 10); do
-              instance_id=$((group + i))
-              if [ $instance_id -le $TOTAL_INSTANCES ]; then
-                run_instance $instance_id
-              fi
+            # تشغيل 20 عملية في الخلفية
+            for i in $(seq $((($CLUSTER-1)*20+1)) $((CLUSTER*20))); do
+              INSTANCE_ID=$i php -d memory_limit=256M main.php >/dev/null 2>&1 &
+              # تأخير قصير بين كل عملية
+              sleep 0.05
             done
             
-            # انتظار قبل المجموعة التالية
-            sleep 5
+            # انتظار انتهاء المجموعة الحالية قبل البدء بالتي تليها
+            echo "Waiting for cluster $CLUSTER to complete..."
+            wait
             
-            # تناوب: إنهاء أول 5 وبدء 5 جديدة
-            if [ $group -gt 0 ]; then
-              echo "=== Rotating processes ==="
-              # إنهاء بعض العمليات القديمة
-              for i in $(seq $((group - 9)) $((group - 5))); do
-                if [ -f "pid_$i" ]; then
-                  kill $(cat "pid_$i") 2>/dev/null || true
-                  rm -f "pid_$i"
-                fi
-              done
-            fi
+            # استراحة قصيرة بين المجموعات
+            sleep 2
           done
           
-          # انتظار جميع العمليات المتبقية
-          echo "=== Waiting for remaining processes ==="
-          wait
-          
-          # جمع النتائج
-          echo "=== Results ==="
-          for i in $(seq 1 $TOTAL_INSTANCES); do
-            if [ -f "output_$i.log" ]; then
-              echo "Instance $i output:"
-              tail -5 "output_$i.log"
-              echo "---"
-            fi
-          done
-          EOF
-          
-          chmod +x run_instances.sh
-          ./run_instances.sh
+          echo "All instances completed!"
 
-      - name: Monitor system resources
+      - name: Monitor execution
         timeout-minutes: 2
         run: |
-          # مراقبة الموارد لمدة دقيقتين
-          echo "=== System Monitoring ==="
-          for i in {1..12}; do
-            echo "[$(date '+%H:%M:%S')] === Snapshot $i ==="
-            echo "CPU: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}')%"
-            echo "Memory: $(free -m | awk '/Mem:/ {printf "%.1f%%", $3/$2*100}')"
-            echo "Processes: $(ps aux | grep php | grep -v grep | wc -l)"
-            echo "Connections: $(ss -tun | wc -l)"
-            echo ""
-            sleep 10
+          echo "=== Resource Monitoring ==="
+          echo "System load average:"
+          cat /proc/loadavg
+          
+          echo -e "\nMemory usage:"
+          free -h
+          
+          echo -e "\nPHP processes count:"
+          ps aux | grep -c "[p]hp main.php"
+          
+          echo -e "\nOpen file descriptors:"
+          ls /proc/self/fd/ | wc -l
+
+      - name: Collect results
+        if: always()
+        run: |
+          echo "=== Final Results Summary ==="
+          
+          # عد الملفات الناتجة
+          RESULT_FILES=$(ls -la output_*.log 2>/dev/null | wc -l)
+          echo "Number of instance output files: $RESULT_FILES"
+          
+          # عرض ملخص من آخر 5 ملفات
+          echo -e "\nLast 5 instance outputs:"
+          ls -t output_*.log 2>/dev/null | head -5 | while read file; do
+            echo "=== $file ==="
+            tail -3 "$file" 2>/dev/null || echo "No output"
           done
