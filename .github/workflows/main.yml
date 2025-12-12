@@ -1,0 +1,132 @@
+name: PR Test Optimized
+
+on:
+  schedule:
+    - cron: '*/3 * * * *'
+  workflow_dispatch:
+
+jobs:
+  high-speed-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15  # زيادة الوقت
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'  # أحدث إصدار
+          extensions: curl, simplexml, pcntl, posix
+          tools: parallel
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y parallel curl wget
+
+      - name: Optimize system limits
+        run: |
+          # زيادة حدود النظام
+          ulimit -n 65535
+          ulimit -u 65535
+          echo "fs.file-max = 1000000" | sudo tee -a /etc/sysctl.conf
+          echo "net.core.somaxconn = 65535" | sudo tee -a /etc/sysctl.conf
+          echo "net.ipv4.tcp_max_syn_backlog = 65535" | sudo tee -a /etc/sysctl.conf
+          sudo sysctl -p
+
+      - name: Run multiple instances in single job
+        run: |
+          # إنشاء ملف تشغيل متوازي
+          cat > run_instances.sh << 'EOF'
+          #!/bin/bash
+          
+          # عدد العمليات المطلوبة
+          TOTAL_INSTANCES=100
+          CONCURRENT_INSTANCES=10  # 10 في كل مرة
+          
+          # دالة لتشغيل instance
+          run_instance() {
+            local instance_id=$1
+            echo "=== Starting Instance $instance_id ==="
+            
+            # تهيئة متغير البيئة
+            export INSTANCE_ID=$instance_id
+            
+            # خيارات PHP لتحسين الأداء
+            php -d memory_limit=-1 \
+                -d max_execution_time=0 \
+                -d opcache.enable=1 \
+                -d opcache.memory_consumption=256 \
+                -d realpath_cache_size=16M \
+                -d disable_functions= \
+                main.php > "output_$instance_id.log" 2>&1 &
+            
+            local pid=$!
+            echo $pid > "pid_$instance_id"
+            
+            # انتظار قصير بين العمليات
+            sleep 0.2
+          }
+          
+          # تشغيل مجموعات من 10
+          for group in $(seq 0 10 90); do
+            echo "=== Starting Group $(($group/10 + 1)) ==="
+            
+            # تشغيل 10 عمليات
+            for i in $(seq 1 10); do
+              instance_id=$((group + i))
+              if [ $instance_id -le $TOTAL_INSTANCES ]; then
+                run_instance $instance_id
+              fi
+            done
+            
+            # انتظار قبل المجموعة التالية
+            sleep 5
+            
+            # تناوب: إنهاء أول 5 وبدء 5 جديدة
+            if [ $group -gt 0 ]; then
+              echo "=== Rotating processes ==="
+              # إنهاء بعض العمليات القديمة
+              for i in $(seq $((group - 9)) $((group - 5))); do
+                if [ -f "pid_$i" ]; then
+                  kill $(cat "pid_$i") 2>/dev/null || true
+                  rm -f "pid_$i"
+                fi
+              done
+            fi
+          done
+          
+          # انتظار جميع العمليات المتبقية
+          echo "=== Waiting for remaining processes ==="
+          wait
+          
+          # جمع النتائج
+          echo "=== Results ==="
+          for i in $(seq 1 $TOTAL_INSTANCES); do
+            if [ -f "output_$i.log" ]; then
+              echo "Instance $i output:"
+              tail -5 "output_$i.log"
+              echo "---"
+            fi
+          done
+          EOF
+          
+          chmod +x run_instances.sh
+          ./run_instances.sh
+
+      - name: Monitor system resources
+        timeout-minutes: 2
+        run: |
+          # مراقبة الموارد لمدة دقيقتين
+          echo "=== System Monitoring ==="
+          for i in {1..12}; do
+            echo "[$(date '+%H:%M:%S')] === Snapshot $i ==="
+            echo "CPU: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}')%"
+            echo "Memory: $(free -m | awk '/Mem:/ {printf "%.1f%%", $3/$2*100}')"
+            echo "Processes: $(ps aux | grep php | grep -v grep | wc -l)"
+            echo "Connections: $(ss -tun | wc -l)"
+            echo ""
+            sleep 10
+          done
