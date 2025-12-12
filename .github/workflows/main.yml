@@ -27,7 +27,7 @@ jobs:
 
       - name: Attempt to increase limits (اختياري - قد لا يعمل)
         run: |
-          # محاولة لرفع الحدود - قد تنجح أو تفستيل
+          # محاولة لرفع الحدود - قد تنجح أو تفشل
           echo "Current limits before:"
           ulimit -a
           
@@ -58,8 +58,8 @@ jobs:
           # إنشاء قائمة بجميع instance IDs
           seq 1 $TOTAL_INSTANCES > instances.txt
           
-          # التعديل هنا: أزل --progress أو استبدله بـ --eta
-          parallel -j 10 --delay 0.2 --eta \
+          # تشغيل مع تحكم دقيق في التوازي (10 عمليات متزامنة فقط)
+          parallel -j 10 --delay 0.2 --progress \
             'INSTANCE_ID={} php -d memory_limit=512M -d max_execution_time=300 main.php 2>&1 | tail -5' \
             :::: instances.txt
           
