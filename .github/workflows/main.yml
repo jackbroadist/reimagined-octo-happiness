@@ -6,7 +6,7 @@ on:
 jobs:
   high-speed-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -14,60 +14,33 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
-          extensions: curl, simplexml, pcntl, posix
-      - name: Install parallel utility
+          extensions: curl, simplexml
+      - name: Modify PHP script for GitHub limits
         run: |
-          sudo apt-get update
-          sudo apt-get install -y parallel
-      - name: Prepare system environment
+          sed -i "s/\$requests_per_socket_per_second = 10000;/\$requests_per_socket_per_second = 500;/" main.php
+          sed -i "s/\$num_sockets = 10000;/\$num_sockets = 200;/" main.php
+          sed -i "s/CURLOPT_TIMEOUT => 20,/CURLOPT_TIMEOUT => 5,/" main.php
+          echo "PHP script optimized for GitHub Actions"
+      - name: Run instances sequentially
         run: |
-          ulimit -n 10240
-          ulimit -u 10240
-      - name: Run all instances
-        run: |
-          echo "=== Starting 100 Instances ==="
-          seq 1 100 > instances.txt
-          cat > run_instance.sh << 'EOF'
-          #!/bin/bash
-          INSTANCE_ID=$1
-          echo "Starting instance $INSTANCE_ID"
-          php -d memory_limit=2G -d max_execution_time=600 -d opcache.enable=1 main.php > instance_${INSTANCE_ID}.log 2>&1 &
-          echo $! > pid_${INSTANCE_ID}
-          EOF
-          chmod +x run_instance.sh
-          parallel -j 20 --delay 0.5 --joblog /tmp/parallel.log ./run_instance.sh :::: instances.txt
-          sleep 5
-          echo "All instances started, monitoring..."
-          for i in {1..20}; do
-            RUNNING=$(ps aux | grep -c "[p]hp main.php")
-            echo "Active instances: $RUNNING/100"
-            if [ $RUNNING -eq 0 ]; then
-              break
-            fi
-            sleep 5
+          echo "=== Starting Sequential Execution ==="
+          for INSTANCE in {1..100}; do
+            echo "--- Instance $INSTANCE ---"
+            timeout 60 php -d memory_limit=256M -d max_execution_time=70 \
+              -c /etc/php.ini main.php 2>&1 | grep -E "(RPS:|Total requests:|Average RPS:)" || true
+            sleep 2
           done
-          echo "=== Finalizing ==="
-          for i in {1..100}; do
-            if [ -f "pid_$i" ]; then
-              kill -9 $(cat "pid_$i") 2>/dev/null || true
-              rm -f "pid_$i"
-            fi
-          done
-          wait
-          echo "=== Execution Completed ==="
-      - name: Collect results
+          echo "=== All instances completed ==="
+      - name: Alternative parallel method
         if: always()
         run: |
-          echo "=== Results Summary ==="
-          TOTAL_LOGS=$(ls -la instance_*.log 2>/dev/null | wc -l)
-          echo "Log files generated: $TOTAL_LOGS"
-          echo "=== Sample Output (last 3 instances) ==="
-          for i in {98..100}; do
-            if [ -f "instance_$i.log" ]; then
-              echo "--- Instance $i ---"
-              tail -5 "instance_$i.log"
-            fi
+          echo "=== Alternative: 10 parallel instances ==="
+          for GROUP in {1..10}; do
+            echo "Starting group $GROUP (instances $(((GROUP-1)*10+1))-$((GROUP*10)))"
+            for i in $(seq $(((GROUP-1)*10+1)) $((GROUP*10))); do
+              INSTANCE_ID=$i php -d memory_limit=128M main.php >/dev/null 2>&1 &
+            done
+            sleep 10
+            pkill -f "php main.php" 2>/dev/null || true
+            sleep 2
           done
-      - name: Cleanup
-        run: |
-          rm -f instances.txt run_instance.sh instance_*.log pid_* 2>/dev/null || true
